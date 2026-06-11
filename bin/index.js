@@ -480,43 +480,10 @@ See [Documentation](https://olumjs.github.io/docs)`;
     });
   }
   
-  detect() {
-    return new Promise((resolve, reject) => {
-      const q1 = {
-        type: "checkbox",
-        name: "pkg",
-        message: "Select packages",
-        choices: [
-          { name: " olum-router", value: "router" },
-          { name: " olum-helpers", value: "helpers" },
-        ],
-      };
-      inquirer.prompt([q1]).then(res => {
-        const answer = res.pkg;
-        if (!answer.length) {
-          resolve("core");
-        } else {
-          if (answer.length === 1 && answer.includes("router")) {
-            resolve("router");
-          } else if (answer.length === 1 && answer.includes("helpers")) {
-            this.hasHelpers = true;
-            resolve("core");
-          } else if (answer.length > 1) {
-            this.hasHelpers = true;
-            resolve("router");
-          }
-        }
-      }).catch(reject);
-    });
-  }
-  
   async create(name) {
     try {
-      // select modules
-      const answer = await this.detect();
-      
       // generate boilerplate
-      await this.clone(name, answer);
+      await this.clone(name, "core");
       await this.readme(name);
       await this.gitignore(name);
       
