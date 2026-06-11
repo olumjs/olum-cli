@@ -45,7 +45,7 @@ class CLI {
     });
     cmd.on("--help", this.guide.bind(this));
     cmd.command("create").arguments("<name>").action(this.create.bind(this));
-    cmd.command("generate").option("-c, --component <file>").option("-s, --service <file>").action(this.generate.bind(this));
+    // cmd.command("generate").option("-c, --component <file>").option("-s, --service <file>").action(this.generate.bind(this));
     cmd.command("g").option("-c, --component <file>").option("-s, --service <file>").action(this.generate.bind(this));
     cmd.parse(process.argv);
   }
@@ -133,34 +133,48 @@ export default {{export}};`;
   }
 
   guide() {
+    const { version, description } = pkgJSON;
     const shorthand = pkgJSON.olum;
-    // title colors
     const titleArr = shorthand.colors.title;
-    const randomColor = titleArr[this.random(titleArr)];
-    // signature shapes
-    const signatureArr = shorthand.signature;
-    const randomSignature = signatureArr[this.random(signatureArr)];
-    
-    // loop to concat all commands
-    let commands = "";
-    for(let key in shorthand.commands) {
-      const cmd = shorthand.commands[key].cmd;
-      const desc = shorthand.commands[key].desc;
-      if (cmd && desc) commands += colors[shorthand.colors.command](cmd) + " " + desc + "\n      ";
-    }
+    const accent = titleArr[this.random(titleArr)];
 
-    const hint = 
-    `
-    ${colors[randomColor].bold(randomSignature)} 
-    ${pkgJSON.description} @${pkgJSON.version}
+    const hl  = s => colors[accent].bold(s);
+    const cmd = s => colors.cyan.bold(s);
+    const arg = s => colors.cyan(s);
+    const dim = s => colors.dim(s);
+    const rule = dim("  " + "─".repeat(54));
 
-    ${colors[randomColor].bold(shorthand.commands.title)}
-      ${commands}
-    ${colors[randomColor].bold(shorthand.docs.title)} ${colors.cyan(shorthand.docs.url)}
-    `;
-    
+    const row = (usage, explanation, note = "") =>
+      "    " + arg(usage.padEnd(28)) + dim(explanation) + (note ? "  " + dim(note) : "");
+
+    const out = `
+${hl(shorthand.signature[0])}
+  ${colors.bold("olum-cli")}  ${dim("v" + version)}  ${dim("·")}  ${dim(description)}
+
+${rule}
+
+  ${hl("Usage")}
+
+    ${cmd("olum")} ${arg("<command>")} ${dim("[options]")}
+
+  ${hl("Commands")}
+
+${row("create <name>",         "Scaffold a new olum project in the current directory")}
+
+  ${hl("Options")}
+
+${row("-V, --version",         "Output the version number")}
+${row("-h, --help",            "Display this help message")}
+
+  ${hl("Docs")}
+
+    ${colors.cyan(shorthand.docs.url)}
+
+${rule}
+`;
+
     console.clear();
-    console.log(hint);
+    console.log(out);
   }
 
   clone(name, branch) {
@@ -280,19 +294,22 @@ export default {{export}};`;
   loader(msg) {
     if (typeof this.interval != "undefined") {
       clearInterval(this.interval);
-      console.log("\n");
+      process.stdout.write("\r" + colors.green("✔") + " " + colors.bold(this.currentMsg) + "\x1B[K\n");
+    } else {
+      process.stdout.write("\x1B[?25l"); // hide cursor
     }
-    const loader = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+    this.currentMsg = msg;
+    const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let x = 0;
     this.interval = setInterval(() => {
-      if (x < loader.length - 1) x++;
-      else x = 0;
-      process.stdout.write("\r" + colors.yellow.bold(msg) + " " + colors.yellow.bold(loader[x]) + "     ");
-    }, 50);
+      process.stdout.write("\r" + colors.cyan(frames[x]) + " " + colors.bold(msg) + "\x1B[K");
+      x = (x + 1) % frames.length;
+    }, 80);
   }
-  
+
   stopLoader() {
     if (typeof this.interval != "undefined") clearInterval(this.interval);
+    process.stdout.write("\x1B[?25h"); // restore cursor
   }
   
   gitignore(name) {
