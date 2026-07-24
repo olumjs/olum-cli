@@ -6,4 +6,4 @@
 </p>
 
 # Olum-CLI
-See [Documentation](https://olumjs.github.io/docs)
+See [Documentation](https://olumjs.top/docs)
