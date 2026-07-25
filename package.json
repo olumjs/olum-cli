@@ -1,6 +1,6 @@
 {
   "name": "olum-cli",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "A CLI tool for olumjs",
   "main": "bin/index.js",
   "bin": {
@@ -21,8 +21,7 @@
   "dependencies": {
     "colors": "^1.4.0",
     "commander": "^7.2.0",
-    "download-git-repo": "^3.0.2",
-    "inquirer": "^8.2.0"
+    "download-git-repo": "^3.0.2"
   },
   "engines": {
     "node": ">=14"

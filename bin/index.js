@@ -16,10 +16,8 @@ if (currentNodeMajorVer < requiredNodeMajorVer) {
 
 const commander = require("commander");
 const cmd = new commander.Command();
-const inquirer = require("inquirer");
 const download = require("download-git-repo");
 const fs = require("fs");
-const path = require("path");
 const colors = require("colors");
 const { exec } = require("child_process");
 const pkgJSON = require("../package.json");
@@ -44,91 +42,14 @@ class CLI {
       process.exitCode = 1;
     });
     cmd.on("--help", this.guide.bind(this));
-    // todo -- add --tailwind flag
-    cmd.command("create").arguments("<name>").action(this.create.bind(this));
-    // cmd.command("generate").option("-c, --component <file>").option("-s, --service <file>").action(this.generate.bind(this));
-    cmd.command("g").option("-c, --component <file>").option("-s, --service <file>").action(this.generate.bind(this));
+    cmd.command("create").arguments("<name>").option("--tailwind", "Install Tailwind CSS").action(this.create.bind(this));
     cmd.parse(process.argv);
   }
-  
-  generate(obj) {
-    let type;
-    let filePath;
-    if (isFullObj(obj)) {
-      if (obj.hasOwnProperty("component")) type = "component";
-      else if (obj.hasOwnProperty("service")) type = "service";
-      filePath = obj[type];
-      let absolutePath = path.resolve(process.cwd(), filePath);
-      const basename = path.basename(absolutePath);
-      const dir = absolutePath.replace(new RegExp(basename+"$"), ""); // remove last portion
-      // console.log({ type, filePath, absolutePath, basename, dir });
-      
-      // create directory if it doesn't exist
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-      // get file name 
-      const fileName = basename.replace(/(\.[a-z]+)$/i, ""); // remove extensions if any
-      // console.log({ fileName });
-      
-      let data;
-      if (type === "component") {
-        data = this.component(fileName);
-        absolutePath = absolutePath.replace(new RegExp(basename+"$"), fileName.cap() + ".html");
-      } else if (type === "service") {
-        data = this.service(fileName);
-        absolutePath = absolutePath.replace(new RegExp(basename+"$"), fileName.toLowerCase() + ".js");
-      } 
-      // console.log({ finalPath: absolutePath });
-
-      // create files
-      fs.writeFile(absolutePath, data, err => {
-        if (err) return console.error(colors.red.bold(err));
-      });
-
-    }
+  tailwind() {
+    
   }
   
-  component(name) {
-    let data = 
-`<template>
-  <div id="{{id}}"></div>
-</template>
-
-<script>
-  export default class {{name}} {
-    render() {}
-  }
-</script>
-
-<style lang="scss">
-  #{{id}} {
-  }
-</style>`;
-
-    data = data.replace(/\{\{name\}\}/g, name.cap());
-    data = data.replace(/\{\{id\}\}/g, name.toLowerCase());
-    return data;
-  }
-  
-  service(name) {
-    let data = 
-`import { Service } from "olum-helpers";
-
-class {{name}} extends Service {
-  constructor() {
-    super("{{event}}");
-  }
-}
-
-const {{export}} = new {{name}}();
-export default {{export}};`;
-
-    data = data.replace(/\{\{name\}\}/g, name.cap());
-    data = data.replace(/\{\{event\}\}/g, "olum_" + name.toLowerCase() + "_event");
-    data = data.replace(/\{\{export\}\}/g, name.toLowerCase());
-    return data;
-  }
-
   random(arr) {
     if (isFullArr(arr)) return Math.floor(Math.random() * arr.length);
   }
@@ -313,10 +234,10 @@ ${rule}
     process.stdout.write("\x1B[?25h"); // restore cursor
   }
   
-  async create(name) {
+  async create(name, options) {
     try {
       // generate boilerplate
-      await this.clone(name, "core");
+      await this.clone(name, "main");
       
       // installing modules
       await this.dep(name);
@@ -324,6 +245,9 @@ ${rule}
       // init git repo
       await this.git(name);
       
+      // options
+      if (options.tailwind) this.tailwind();
+
       // instructions
       this.postInstall(name);
     } catch (err) {
