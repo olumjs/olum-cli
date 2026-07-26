@@ -137,6 +137,10 @@ ${rule}
 
 ${row("create <name>",         "Scaffold a new olum project in the current directory")}
 
+  ${hl("Flags")}
+
+${row("--tailwind",             "Install and configure Tailwind CSS")}
+
   ${hl("Options")}
 
 ${row("-V, --version",         "Output the version number")}
