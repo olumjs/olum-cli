@@ -27,6 +27,11 @@ const isObj = obj => !!(obj !== null && typeof obj === "object");
 const isFullObj = obj => !!(isObj(obj) && Array.isArray(Object.keys(obj)) && Object.keys(obj).length);
 const isFullArr = arr => !!(isObj(arr) && Array.isArray(arr) && arr.length);
 const isDef = val => !!(val !== undefined && val !== null);
+const toKebabCase = str => str
+  .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+  .replace(/[\s_]+/g, "-")
+  .replace(/[^a-zA-Z0-9-]/g, "")
+  .toLowerCase();
 String.prototype.cap = function () {
   return this.toLowerCase().split(" ").map(function (word) {
     return word.charAt(0).toUpperCase() + word.slice(1);
@@ -46,8 +51,57 @@ class CLI {
     cmd.parse(process.argv);
   }
 
-  tailwind() {
-    
+  tailwind(name) {
+    this.loader("Configuring Tailwind CSS");
+    return new Promise((resolve, reject) => {
+      const pkgPath = `./${name}/package.json`;
+      fs.readFile(pkgPath, "utf8", (err, data) => {
+        if (err) return reject(err);
+        const content = JSON.parse(data);
+
+        content.scripts = content.scripts || {};
+        Object.assign(content.scripts, {
+          css: "tailwindcss -i src/main.css -o public/main.css",
+          "css:watch": "npm run css -- --watch",
+          "dev:app": "olum-compiler dev",
+          dev: "npm run css && concurrently -k -n css,app -c magenta,green \"npm run css:watch\" \"npm run dev:app\"",
+        });
+
+        content.devDependencies = content.devDependencies || {};
+        Object.assign(content.devDependencies, {
+          "@tailwindcss/cli": "latest",
+          tailwindcss: "latest",
+          concurrently: "latest",
+        });
+
+        fs.writeFile(pkgPath, JSON.stringify(content, null, 2), err => {
+          if (err) return reject(err);
+
+          fs.readFile(`./${name}/public/main.css`, "utf8", (err, css) => {
+            if (err) return reject(err);
+
+            fs.writeFile(`./${name}/src/main.css`, `@import "tailwindcss";\n\n${css}`, err => {
+              if (err) return reject(err);
+
+              const tailwindConfig =
+`/** @type {import('tailwindcss').Config} */
+module.exports = {
+  content: ["./src/**/*.html", "./src/**/*.js"],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+}
+`;
+              fs.writeFile(`./${name}/tailwind.config.js`, tailwindConfig, err => {
+                if (err) return reject(err);
+                resolve();
+              });
+            });
+          });
+        });
+      });
+    });
   }
   
   random(arr) {
@@ -106,19 +160,29 @@ ${rule}
       download(`direct:${repo}#${branch}`, `./${name}`, { clone: true }, err => {
         if (err) return reject("Error while cloning starter code \n" + err);
         
-        if (this.hasHelpers) {
-          fs.readFile(`./${name}/package.json`, "utf8", (err, data) => {
+        fs.readFile(`./${name}/package.json`, "utf8", (err, data) => {
+          if (err) return reject(err);
+          const content = JSON.parse(data);
+          content.name = toKebabCase(name);
+          if (this.hasHelpers) content.dependencies["olum-helpers"] = "latest";
+          fs.writeFile(`./${name}/package.json`, JSON.stringify(content, null, 2), err => {
             if (err) return reject(err);
-            const content = JSON.parse(data);
-            content.dependencies["olum-helpers"] = "latest";
-            fs.writeFile(`./${name}/package.json`, JSON.stringify(content, null, 2), err => {
-              if (err) return reject(err);
-              return resolve();
-            });
+            return resolve();
           });
-        }
-        
-        return resolve();
+        });
+      });
+    });
+  }
+
+  readme(name) {
+    return new Promise((resolve, reject) => {
+      const readmePath = `./${name}/README.md`;
+      fs.readFile(readmePath, "utf8", (err, data) => {
+        if (err) return reject(err);
+        fs.writeFile(readmePath, data.replace(/{{name}}/g, name), err => {
+          if (err) return reject(err);
+          resolve();
+        });
       });
     });
   }
@@ -238,16 +302,19 @@ ${rule}
     try {
       // generate boilerplate
       await this.clone(name, "main");
-      
+
+      // rename app in README
+      await this.readme(name);
+
+      // options
+      if (options.tailwind) await this.tailwind(name);
+
       // installing modules
       await this.dep(name);
       
       // init git repo
       await this.git(name);
       
-      // options
-      if (options.tailwind) this.tailwind();
-
       // instructions
       this.postInstall(name);
     } catch (err) {
