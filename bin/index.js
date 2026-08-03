@@ -29,6 +29,8 @@ const uiRawUrl = "https://raw.githubusercontent.com/olumjs/olum-ui/refs/heads/ma
 const registryUrl = `${uiRawUrl}/registry.json`;
 const stylesPath = "src/main.css";
 const stylesHref = "/src/components/ui/olum-ui.css";
+// runtime packages an olum-ui component may import, checked against the app's package.json
+const uiDeps = ["tailwind-merge"];
 
 // helpers
 const isObj = obj => !!(obj !== null && typeof obj === "object");
@@ -401,7 +403,7 @@ ${rule}
             if (err) return reject(err);
             fs.writeFile(dest, content, err => {
               if (err) return reject(err);
-              resolve(dest);
+              resolve({ dest, content });
             });
           });
         })
@@ -433,6 +435,42 @@ ${rule}
           });
         })
         .catch(reject);
+    });
+  }
+
+  // components may import runtime packages, add the missing ones to the app's package.json
+  deps(component, source) {
+    const declared = isFullArr(component.dependencies) ? component.dependencies : [];
+    const imported = uiDeps.filter(dep => new RegExp(`["']${dep}["']`).test(source));
+    const needed = declared.concat(imported).filter((dep, i, arr) => arr.indexOf(dep) === i);
+    if (!isFullArr(needed)) return Promise.resolve([]);
+
+    return new Promise((resolve, reject) => {
+      fs.readFile("package.json", "utf8", (err, data) => {
+        if (err) return reject(err);
+
+        let content;
+        try {
+          content = JSON.parse(data);
+        } catch (err) {
+          return reject("Error while parsing 'package.json' \n" + err);
+        }
+
+        // already there, in any of the dependency fields
+        const installed = Object.assign({}, content.dependencies, content.devDependencies, content.peerDependencies);
+        const missing = needed.filter(dep => !isDef(installed[dep]));
+        if (!isFullArr(missing)) return resolve([]);
+
+        content.dependencies = content.dependencies || {};
+        missing.forEach(dep => (content.dependencies[dep] = "latest"));
+
+        // keep the trailing newline if the file had one
+        const eol = data.endsWith("\n") ? "\n" : "";
+        fs.writeFile("package.json", JSON.stringify(content, null, 2) + eol, err => {
+          if (err) return reject(err);
+          resolve(missing);
+        });
+      });
     });
   }
 
@@ -469,7 +507,7 @@ ${rule}
       const component = await this.component(name, components);
 
       // clone the component into src/components/ui/<name>.html
-      const dest = await this.ui(component);
+      const { dest, content } = await this.ui(component);
 
       // clone the design tokens into src/components/ui/olum-ui.css
       const styles = await this.styles();
@@ -477,11 +515,18 @@ ${rule}
       // link them in public/index.html
       const index = await this.link();
 
+      // packages the component imports but the app doesn't have
+      const added = await this.deps(component, content);
+
       this.stopLoader();
       process.stdout.write("\r" + colors.green("✔") + " " + colors.bold(this.currentMsg) + "\x1B[K\n");
       console.log(`\n  Added ${colors.cyan(dest)}`);
       if (isDef(styles)) console.log(`  Added ${colors.cyan(styles)}`);
       if (isDef(index)) console.log(`  Updated ${colors.cyan(index)}`);
+      if (isFullArr(added)) {
+        console.log(`  Added ${colors.cyan(added.join(", "))} to ${colors.cyan("package.json")}`);
+        console.log(colors.yellow(`\n  Run ${colors.cyan("npm i")} to install ${added.length > 1 ? "them" : "it"}`));
+      }
       console.log("");
     } catch (err) {
       this.stopLoader();
