@@ -27,6 +27,8 @@ const pkgJSON = require("../package.json");
 // olum-ui registry
 const uiRawUrl = "https://raw.githubusercontent.com/olumjs/olum-ui/refs/heads/main";
 const registryUrl = `${uiRawUrl}/registry.json`;
+const stylesPath = "src/main.css";
+const stylesHref = "/src/components/ui/olum-ui.css";
 
 // helpers
 const isObj = obj => !!(obj !== null && typeof obj === "object");
@@ -388,7 +390,7 @@ ${rule}
   ui(component) {
     this.loader(`Adding ${component.title || component.name}`);
     const dir = path.join("src", "components", "ui");
-    const dest = path.join(dir, `${toKebabCase(component.name)}.html`);
+    const dest = path.join(dir, path.basename(component.path));
 
     return new Promise((resolve, reject) => {
       if (fs.existsSync(dest)) return reject(`'${dest}' already exists, remove it first then run the command again`);
@@ -407,6 +409,56 @@ ${rule}
     });
   }
 
+  // olum-ui components rely on the design tokens defined in the library's main.css
+  styles() {
+    const dir = path.join("src", "components", "ui");
+    const dest = path.join(dir, "olum-ui.css");
+
+    // keep any local tweaks, only pull it down the first time
+    if (fs.existsSync(dest)) return Promise.resolve(null);
+
+    this.loader("Adding olum-ui styles");
+    return new Promise((resolve, reject) => {
+      this.fetch(`${uiRawUrl}/${stylesPath}`)
+        .then(content => {
+          // tailwind is imported by the app's own entry file, not from here
+          const css = content.replace(/^[ \t]*@import\s+["']tailwindcss["'];?[ \t]*$/m, match => `/* ${match.trim()} */`);
+
+          fs.mkdir(dir, { recursive: true }, err => {
+            if (err) return reject(err);
+            fs.writeFile(dest, css, err => {
+              if (err) return reject(err);
+              resolve(dest);
+            });
+          });
+        })
+        .catch(reject);
+    });
+  }
+
+  // link the styles in the app's entry html
+  link() {
+    const indexPath = path.join("public", "index.html");
+    const tag = `<link rel="stylesheet" href="${stylesHref}" />`;
+
+    return new Promise((resolve, reject) => {
+      if (!fs.existsSync(indexPath)) return resolve(null);
+
+      fs.readFile(indexPath, "utf8", (err, data) => {
+        if (err) return reject(err);
+
+        // already linked
+        if (data.includes(stylesHref)) return resolve(null);
+        if (!data.includes("</head>")) return reject(`No '</head>' found in '${indexPath}', add ${tag} manually`);
+
+        fs.writeFile(indexPath, data.replace("</head>", `  ${tag}\n  </head>`), err => {
+          if (err) return reject(err);
+          resolve(indexPath);
+        });
+      });
+    });
+  }
+
   async add(name) {
     try {
       // must run from the root of an olum app
@@ -419,9 +471,18 @@ ${rule}
       // clone the component into src/components/ui/<name>.html
       const dest = await this.ui(component);
 
+      // clone the design tokens into src/components/ui/olum-ui.css
+      const styles = await this.styles();
+
+      // link them in public/index.html
+      const index = await this.link();
+
       this.stopLoader();
       process.stdout.write("\r" + colors.green("✔") + " " + colors.bold(this.currentMsg) + "\x1B[K\n");
-      console.log(`\n  Added ${colors.cyan(dest)}\n`);
+      console.log(`\n  Added ${colors.cyan(dest)}`);
+      if (isDef(styles)) console.log(`  Added ${colors.cyan(styles)}`);
+      if (isDef(index)) console.log(`  Updated ${colors.cyan(index)}`);
+      console.log("");
     } catch (err) {
       this.stopLoader();
       console.error(colors.red(err));
