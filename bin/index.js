@@ -18,9 +18,15 @@ const commander = require("commander");
 const cmd = new commander.Command();
 const download = require("download-git-repo");
 const fs = require("fs");
+const path = require("path");
+const https = require("https");
 const colors = require("colors");
 const { exec } = require("child_process");
 const pkgJSON = require("../package.json");
+
+// olum-ui registry
+const uiRawUrl = "https://raw.githubusercontent.com/olumjs/olum-ui/refs/heads/main";
+const registryUrl = `${uiRawUrl}/registry.json`;
 
 // helpers
 const isObj = obj => !!(obj !== null && typeof obj === "object");
@@ -48,6 +54,7 @@ class CLI {
     });
     cmd.on("--help", this.guide.bind(this));
     cmd.command("create").arguments("<name>").option("--tailwind", "Install Tailwind CSS").action(this.create.bind(this));
+    cmd.command("add").arguments("<name>").action(this.add.bind(this));
     cmd.parse(process.argv);
   }
 
@@ -136,6 +143,7 @@ ${rule}
   ${hl("Commands")}
 
 ${row("create <name>",         "Scaffold a new olum project in the current directory")}
+${row("add <name>",            "Add an olum-ui component to src/components/ui")}
 
   ${hl("Flags")}
 
@@ -321,6 +329,99 @@ ${rule}
       
       // instructions
       this.postInstall(name);
+    } catch (err) {
+      this.stopLoader();
+      console.error(colors.red(err));
+    }
+  }
+
+  fetch(url) {
+    return new Promise((resolve, reject) => {
+      https
+        .get(url, { headers: { "User-Agent": "olum-cli" } }, res => {
+          const { statusCode, headers } = res;
+
+          // follow redirects
+          if (statusCode >= 300 && statusCode < 400 && isDef(headers.location)) {
+            res.resume();
+            return resolve(this.fetch(headers.location));
+          }
+
+          if (statusCode !== 200) {
+            res.resume();
+            return reject(`Request failed with status code ${statusCode}\n${url}`);
+          }
+
+          let data = "";
+          res.setEncoding("utf8");
+          res.on("data", chunk => (data += chunk));
+          res.on("end", () => resolve(data));
+        })
+        .on("error", err => reject(err));
+    });
+  }
+
+  registry() {
+    this.loader("Fetching registry");
+    return this.fetch(registryUrl).then(raw => {
+      let content;
+      try {
+        content = JSON.parse(raw);
+      } catch (err) {
+        return Promise.reject("Error while parsing registry.json \n" + err);
+      }
+      if (!isFullObj(content) || !isFullArr(content.components)) return Promise.reject("No components found in the registry");
+      return content.components;
+    });
+  }
+
+  component(name, components) {
+    const slug = toKebabCase(name);
+    const found = components.find(item => isFullObj(item) && toKebabCase(item.name) === slug);
+    if (!isDef(found)) {
+      const available = components.map(item => item.name).join(", ");
+      return Promise.reject(`Component '${name}' was not found in the registry\n Available components: ${available}`);
+    }
+    return Promise.resolve(found);
+  }
+
+  ui(component) {
+    this.loader(`Adding ${component.title || component.name}`);
+    const dir = path.join("src", "components", "ui");
+    const dest = path.join(dir, `${toKebabCase(component.name)}.html`);
+
+    return new Promise((resolve, reject) => {
+      if (fs.existsSync(dest)) return reject(`'${dest}' already exists, remove it first then run the command again`);
+
+      this.fetch(`${uiRawUrl}/${component.path}`)
+        .then(content => {
+          fs.mkdir(dir, { recursive: true }, err => {
+            if (err) return reject(err);
+            fs.writeFile(dest, content, err => {
+              if (err) return reject(err);
+              resolve(dest);
+            });
+          });
+        })
+        .catch(reject);
+    });
+  }
+
+  async add(name) {
+    try {
+      // must run from the root of an olum app
+      if (!fs.existsSync("package.json")) throw "No 'package.json' found, run this command from the root of your olum app";
+
+      // fetch registry then match the given name against it
+      const components = await this.registry();
+      const component = await this.component(name, components);
+
+      // clone the component into src/components/ui/<name>.html
+      const dest = await this.ui(component);
+
+      this.stopLoader();
+      process.stdout.write("\r" + colors.green("✔") + " " + colors.bold(this.currentMsg) + "\x1B[K\n");
+      console.log(`\n  Added ${colors.cyan(dest)}\n`);
     } catch (err) {
       this.stopLoader();
       console.error(colors.red(err));
