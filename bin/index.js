@@ -28,7 +28,10 @@ const pkgJSON = require("../package.json");
 const uiRawUrl = "https://raw.githubusercontent.com/olumjs/olum-ui/refs/heads/main";
 const registryUrl = `${uiRawUrl}/registry.json`;
 const stylesPath = "src/main.css";
-const stylesHref = "/src/components/ui/olum-ui.css";
+// marks the block appended to the app's src/main.css, so it's only appended once
+const stylesMarker = "/* olum-ui */";
+// an active (not commented out) tailwind import line
+const tailwindImport = /^[ \t]*@import\s+["']tailwindcss["'];?[ \t]*$/m;
 // runtime packages an olum-ui component may import, checked against the app's package.json
 const uiDeps = ["tailwind-merge"];
 
@@ -413,28 +416,36 @@ ${rule}
 
   // olum-ui components rely on the design tokens defined in the library's main.css
   styles() {
-    const dir = path.join("src", "components", "ui");
-    const dest = path.join(dir, "olum-ui.css");
+    const dest = path.join("src", "main.css");
 
-    // keep any local tweaks, only pull it down the first time
-    if (fs.existsSync(dest)) return Promise.resolve(null);
-
-    this.loader("Adding olum-ui styles");
     return new Promise((resolve, reject) => {
-      this.fetch(`${uiRawUrl}/${stylesPath}`)
-        .then(content => {
-          // tailwind is imported by the app's own entry file, not from here
-          const css = content.replace(/^[ \t]*@import\s+["']tailwindcss["'];?[ \t]*$/m, match => `/* ${match.trim()} */`);
+      if (!fs.existsSync(dest)) return reject(`No '${dest}' found, run this command from the root of your olum app`);
 
-          fs.mkdir(dir, { recursive: true }, err => {
-            if (err) return reject(err);
-            fs.writeFile(dest, css, err => {
+      fs.readFile(dest, "utf8", (err, data) => {
+        if (err) return reject(err);
+
+        // keep any local tweaks, only append it the first time
+        if (data.includes(stylesMarker)) return resolve(null);
+
+        this.loader("Adding olum-ui styles");
+        this.fetch(`${uiRawUrl}/${stylesPath}`)
+          .then(content => {
+            // the appended copy never carries an active import, the app's main.css owns that line
+            const found = content.match(tailwindImport);
+            const css = isDef(found) ? content.replace(tailwindImport, match => `/* ${match.trim()} */`) : content;
+
+            // tailwind isn't pulled in yet, hoist the import to the top since @import must precede any rule
+            const head = isDef(found) && !tailwindImport.test(data) ? `${found[0].trim()}\n${data}` : data;
+
+            // keep the trailing newline if the file had one
+            const eol = head.endsWith("\n") ? "" : "\n";
+            fs.writeFile(dest, `${head}${eol}\n${stylesMarker}\n${css}`, err => {
               if (err) return reject(err);
               resolve(dest);
             });
-          });
-        })
-        .catch(reject);
+          })
+          .catch(reject);
+      });
     });
   }
 
@@ -474,29 +485,6 @@ ${rule}
     });
   }
 
-  // link the styles in the app's entry html
-  link() {
-    const indexPath = path.join("public", "index.html");
-    const tag = `<link rel="stylesheet" href="${stylesHref}" />`;
-
-    return new Promise((resolve, reject) => {
-      if (!fs.existsSync(indexPath)) return resolve(null);
-
-      fs.readFile(indexPath, "utf8", (err, data) => {
-        if (err) return reject(err);
-
-        // already linked
-        if (data.includes(stylesHref)) return resolve(null);
-        if (!data.includes("</head>")) return reject(`No '</head>' found in '${indexPath}', add ${tag} manually`);
-
-        fs.writeFile(indexPath, data.replace("</head>", `  ${tag}\n  </head>`), err => {
-          if (err) return reject(err);
-          resolve(indexPath);
-        });
-      });
-    });
-  }
-
   async add(name) {
     try {
       // must run from the root of an olum app
@@ -509,11 +497,8 @@ ${rule}
       // clone the component into src/components/ui/<name>.html
       const { dest, content } = await this.ui(component);
 
-      // clone the design tokens into src/components/ui/olum-ui.css
+      // append the design tokens to src/main.css
       const styles = await this.styles();
-
-      // link them in public/index.html
-      const index = await this.link();
 
       // packages the component imports but the app doesn't have
       const added = await this.deps(component, content);
@@ -521,8 +506,7 @@ ${rule}
       this.stopLoader();
       process.stdout.write("\r" + colors.green("✔") + " " + colors.bold(this.currentMsg) + "\x1B[K\n");
       console.log(`\n  Added ${colors.cyan(dest)}`);
-      if (isDef(styles)) console.log(`  Added ${colors.cyan(styles)}`);
-      if (isDef(index)) console.log(`  Updated ${colors.cyan(index)}`);
+      if (isDef(styles)) console.log(`  Updated ${colors.cyan(styles)}`);
       if (isFullArr(added)) {
         console.log(`  Added ${colors.cyan(added.join(", "))} to ${colors.cyan("package.json")}`);
         console.log(colors.yellow(`\n  Run ${colors.cyan("npm i")} to install ${added.length > 1 ? "them" : "it"}`));
