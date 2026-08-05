@@ -32,8 +32,14 @@ const stylesPath = "src/main.css";
 const stylesMarker = "/* olum-ui */";
 // an active (not commented out) tailwind import line
 const tailwindImport = /^[ \t]*@import\s+["']tailwindcss["'];?[ \t]*$/m;
-// runtime packages an olum-ui component may import, checked against the app's package.json
-const uiDeps = ["tailwind-merge"];
+// where the registry keeps its components, deps are resolved against it
+const uiRoot = "src/components";
+// where they land in the app, mirroring the library's folder structure so the relative imports keep working
+const uiDest = path.join("src", "components", "ui");
+// components meant for the library's own docs, never installable
+const uiInternal = "internal";
+// import specifiers, both the static and the dynamic form
+const importPaths = /(?:^|[\s;}])(?:import|export)[^"';]*?from\s*["']([^"']+)["']|(?:^|[\s;}])import\s*\(?\s*["']([^"']+)["']/g;
 
 // helpers
 const isObj = obj => !!(obj !== null && typeof obj === "object");
@@ -378,40 +384,64 @@ ${rule}
         return Promise.reject("Error while parsing registry.json \n" + err);
       }
       if (!isFullObj(content) || !isFullArr(content.components)) return Promise.reject("No components found in the registry");
-      return content.components;
+      // the library's own docs components aren't meant to be installed
+      return content.components.filter(item => isFullObj(item) && isDef(item.path) && item.category !== uiInternal);
     });
   }
 
   component(name, components) {
     const slug = toKebabCase(name);
-    const found = components.find(item => isFullObj(item) && toKebabCase(item.name) === slug);
+    const found = components.find(item => toKebabCase(item.name) === slug);
     if (!isDef(found)) {
-      const available = components.map(item => item.name).join(", ");
-      return Promise.reject(`Component '${name}' was not found in the registry\n Available components: ${available}`);
+      // group by category, the registry is long enough that a flat list is hard to scan
+      const groups = components.reduce((acc, item) => {
+        const category = item.category || "other";
+        (acc[category] = acc[category] || []).push(item.name);
+        return acc;
+      }, {});
+      const available = Object.keys(groups)
+        .map(category => `\n   ${colors.bold(category)}  ${groups[category].join(", ")}`)
+        .join("");
+      return Promise.reject(`Component '${name}' was not found in the registry\n\n  Available components:${available}`);
     }
     return Promise.resolve(found);
   }
 
-  ui(component) {
+  // a component is its own file plus the deps listed in the registry, either siblings ("CardTitle.html")
+  // or files of another component ("Button/Button.html"), both relative to the library's src/components
+  files(component) {
+    const dir = path.posix.dirname(component.path);
+    const deps = isFullArr(component.deps) ? component.deps : [];
+    const paths = [component.path].concat(deps.map(dep => (dep.includes("/") ? path.posix.join(uiRoot, dep) : path.posix.join(dir, dep))));
+
+    return paths
+      .filter((item, i, arr) => arr.indexOf(item) === i)
+      .map(item => {
+        // mirror the library's layout so the relative imports between components resolve
+        const rel = item.startsWith(`${uiRoot}/`) ? item.slice(uiRoot.length + 1) : path.posix.basename(item);
+        return { path: item, dest: path.join(uiDest, ...rel.split("/")) };
+      });
+  }
+
+  async ui(component) {
     this.loader(`Adding ${component.title || component.name}`);
-    const dir = path.join("src", "components", "ui");
-    const dest = path.join(dir, path.basename(component.path));
+    const files = this.files(component);
+    const [main] = files;
 
-    return new Promise((resolve, reject) => {
-      if (fs.existsSync(dest)) return reject(`'${dest}' already exists, remove it first then run the command again`);
+    if (fs.existsSync(main.dest)) throw `'${main.dest}' already exists, remove it first then run the command again`;
 
-      this.fetch(`${uiRawUrl}/${component.path}`)
-        .then(content => {
-          fs.mkdir(dir, { recursive: true }, err => {
-            if (err) return reject(err);
-            fs.writeFile(dest, content, err => {
-              if (err) return reject(err);
-              resolve({ dest, content });
-            });
-          });
-        })
-        .catch(reject);
-    });
+    // deps are shared between components, whatever is already there was installed by an earlier 'add'
+    const missing = files.filter(file => !fs.existsSync(file.dest));
+    const skipped = files.filter(file => fs.existsSync(file.dest)).map(file => file.dest);
+
+    const sources = await Promise.all(missing.map(file => this.fetch(`${uiRawUrl}/${file.path}`)));
+
+    for (let i = 0; i < missing.length; i++) {
+      await fs.promises.mkdir(path.dirname(missing[i].dest), { recursive: true });
+      await fs.promises.writeFile(missing[i].dest, sources[i]);
+    }
+
+    return { dest: main.dest, added: missing.map(file => file.dest), skipped, source: sources.join("\n") };
   }
 
   // olum-ui components rely on the design tokens defined in the library's main.css
@@ -449,11 +479,25 @@ ${rule}
     });
   }
 
+  // every bare specifier a component imports is a runtime package, relative ones are the deps we just cloned
+  packages(source) {
+    const found = [];
+    let match;
+    importPaths.lastIndex = 0;
+    while (isDef((match = importPaths.exec(source)))) {
+      const specifier = match[1] || match[2];
+      if (!isDef(specifier) || specifier.startsWith(".") || specifier.startsWith("/")) continue;
+      // keep the package name, drop any subpath ("pkg/sub", "@scope/pkg/sub")
+      const parts = specifier.split("/");
+      const name = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+      if (found.indexOf(name) === -1) found.push(name);
+    }
+    return found;
+  }
+
   // components may import runtime packages, add the missing ones to the app's package.json
-  deps(component, source) {
-    const declared = isFullArr(component.dependencies) ? component.dependencies : [];
-    const imported = uiDeps.filter(dep => new RegExp(`["']${dep}["']`).test(source));
-    const needed = declared.concat(imported).filter((dep, i, arr) => arr.indexOf(dep) === i);
+  deps(source) {
+    const needed = this.packages(source);
     if (!isFullArr(needed)) return Promise.resolve([]);
 
     return new Promise((resolve, reject) => {
@@ -494,22 +538,24 @@ ${rule}
       const components = await this.registry();
       const component = await this.component(name, components);
 
-      // clone the component into src/components/ui/<name>.html
-      const { dest, content } = await this.ui(component);
+      // clone the component and its deps into src/components/ui/<Component>/
+      const { dest, added, skipped, source } = await this.ui(component);
 
       // append the design tokens to src/main.css
       const styles = await this.styles();
 
       // packages the component imports but the app doesn't have
-      const added = await this.deps(component, content);
+      const packages = await this.deps(source);
 
       this.stopLoader();
       process.stdout.write("\r" + colors.green("✔") + " " + colors.bold(this.currentMsg) + "\x1B[K\n");
       console.log(`\n  Added ${colors.cyan(dest)}`);
+      added.filter(file => file !== dest).forEach(file => console.log(`  Added ${colors.cyan(file)}`));
+      skipped.forEach(file => console.log(colors.dim(`  Skipped ${file}, already exists`)));
       if (isDef(styles)) console.log(`  Updated ${colors.cyan(styles)}`);
-      if (isFullArr(added)) {
-        console.log(`  Added ${colors.cyan(added.join(", "))} to ${colors.cyan("package.json")}`);
-        console.log(colors.yellow(`\n  Run ${colors.cyan("npm i")} to install ${added.length > 1 ? "them" : "it"}`));
+      if (isFullArr(packages)) {
+        console.log(`  Added ${colors.cyan(packages.join(", "))} to ${colors.cyan("package.json")}`);
+        console.log(colors.yellow(`\n  Run ${colors.cyan("npm i")} to install ${packages.length > 1 ? "them" : "it"}`));
       }
       console.log("");
     } catch (err) {
