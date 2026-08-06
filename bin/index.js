@@ -27,13 +27,16 @@ const pkgJSON = require("../package.json");
 // olum-ui registry
 const uiRawUrl = "https://raw.githubusercontent.com/olumjs/olum-ui/refs/heads/main";
 const registryUrl = `${uiRawUrl}/registry.json`;
-const stylesPath = "src/main.css";
-// the app gets its own copy, kept out of src/main.css so it survives a tailwind rebuild
-const stylesDest = path.join("src", "olum-ui.css");
+// the tokens themselves, not the docs site's src/main.css that wraps them in @font-face rules
+const stylesPath = "src/components/ui/olum-ui.css";
 // where the registry keeps its components, deps are resolved against it
 const uiRoot = "src/components/ui";
 // where they land in the app, mirroring the library's folder structure so the relative imports keep working
 const uiDest = path.join("src", "components", "ui");
+// the app gets its own copy, kept out of src/main.css so it survives a tailwind rebuild
+const stylesDest = path.join(uiDest, "olum-ui.css");
+// the same path as an url, for the <link> the app has to add
+const stylesHref = "/" + stylesDest.split(path.sep).join("/");
 // components meant for the library's own docs, never installable
 const uiInternal = "internal";
 // import specifiers, both the static and the dynamic form
@@ -374,7 +377,8 @@ ${rule}
 
   registry() {
     this.loader("Fetching registry");
-    return this.fetch(registryUrl).then(raw => {
+    // raw.githubusercontent caches, and a stale registry points at files the library has already moved
+    return this.fetch(`${registryUrl}?t=${Date.now()}`).then(raw => {
       let content;
       try {
         content = JSON.parse(raw);
@@ -405,20 +409,37 @@ ${rule}
     return Promise.resolve(found);
   }
 
-  // a component is its own file plus the deps listed in the registry, either siblings ("CardTitle.html")
-  // or files of another component ("Button/Button.html"), both relative to the library's src/components
+  // mirror the library's layout so the relative imports between components resolve
+  dest(item) {
+    const rel = item.startsWith(`${uiRoot}/`) ? item.slice(uiRoot.length + 1) : path.posix.basename(item);
+    return path.join(uiDest, ...rel.split("/"));
+  }
+
+  // a component is its own file plus the deps listed in the registry. A dep with a slash is always
+  // relative to the library's src/components ("Button/Button.html"). A bare name is ambiguous: it's
+  // either a sibling of the component ("CardTitle.html") or a file shared by several of them, sitting
+  // at the root of the components folder ("portal.js"). Both are candidates, the sibling wins.
   files(component) {
     const dir = path.posix.dirname(component.path);
     const deps = isFullArr(component.deps) ? component.deps : [];
-    const paths = [component.path].concat(deps.map(dep => (dep.includes("/") ? path.posix.join(uiRoot, dep) : path.posix.join(dir, dep))));
+    const candidates = [[component.path]].concat(
+      deps.map(dep => (dep.includes("/") ? [path.posix.join(uiRoot, dep)] : [path.posix.join(dir, dep), path.posix.join(uiRoot, dep)]))
+    );
 
-    return paths
-      .filter((item, i, arr) => arr.indexOf(item) === i)
-      .map(item => {
-        // mirror the library's layout so the relative imports between components resolve
-        const rel = item.startsWith(`${uiRoot}/`) ? item.slice(uiRoot.length + 1) : path.posix.basename(item);
-        return { path: item, dest: path.join(uiDest, ...rel.split("/")) };
-      });
+    return candidates
+      .filter((item, i, arr) => arr.findIndex(other => other.join("\n") === item.join("\n")) === i)
+      .map(paths => ({ paths, dests: paths.map(item => this.dest(item)) }));
+  }
+
+  // the candidates are guesses, keep the first one the library actually has
+  async resolve(paths) {
+    for (let i = 0; i < paths.length; i++) {
+      try {
+        return { path: paths[i], source: await this.fetch(`${uiRawUrl}/${paths[i]}`) };
+      } catch (err) {
+        if (i === paths.length - 1) throw err;
+      }
+    }
   }
 
   async ui(component) {
@@ -426,20 +447,27 @@ ${rule}
     const files = this.files(component);
     const [main] = files;
 
-    if (fs.existsSync(main.dest)) throw `'${main.dest}' already exists, remove it first then run the command again`;
+    // an ambiguous dep may already be installed under either of its candidate paths
+    const installed = file => file.dests.filter(dest => fs.existsSync(dest))[0];
+
+    if (isDef(installed(main))) throw `'${main.dests[0]}' already exists, remove it first then run the command again`;
 
     // deps are shared between components, whatever is already there was installed by an earlier 'add'
-    const missing = files.filter(file => !fs.existsSync(file.dest));
-    const skipped = files.filter(file => fs.existsSync(file.dest)).map(file => file.dest);
+    const missing = files.filter(file => !isDef(installed(file)));
+    const skipped = files.filter(file => isDef(installed(file))).map(installed);
 
-    const sources = await Promise.all(missing.map(file => this.fetch(`${uiRawUrl}/${file.path}`)));
+    const resolved = await Promise.all(missing.map(file => this.resolve(file.paths)));
 
-    for (let i = 0; i < missing.length; i++) {
-      await fs.promises.mkdir(path.dirname(missing[i].dest), { recursive: true });
-      await fs.promises.writeFile(missing[i].dest, sources[i]);
+    const added = [];
+    for (let i = 0; i < resolved.length; i++) {
+      const dest = this.dest(resolved[i].path);
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      await fs.promises.writeFile(dest, resolved[i].source);
+      added.push(dest);
     }
 
-    return { dest: main.dest, added: missing.map(file => file.dest), skipped, source: sources.join("\n") };
+    // main is files[0] and can't have been skipped, the throw above covers that
+    return { dest: added[0], added, skipped, source: resolved.map(item => item.source).join("\n") };
   }
 
   // olum-ui components rely on the design tokens defined in the library's main.css
@@ -453,9 +481,13 @@ ${rule}
       this.loader("Adding olum-ui styles");
       this.fetch(`${uiRawUrl}/${stylesPath}`)
         .then(content => {
-          fs.writeFile(stylesDest, content, err => {
+          // the components folder is there by now, unless every file of this component was already installed
+          fs.mkdir(path.dirname(stylesDest), { recursive: true }, err => {
             if (err) return reject(err);
-            resolve(stylesDest);
+            fs.writeFile(stylesDest, content, err => {
+              if (err) return reject(err);
+              resolve(stylesDest);
+            });
           });
         })
         .catch(reject);
@@ -524,7 +556,7 @@ ${rule}
       // clone the component and its deps into src/components/ui/<Component>/
       const { dest, added, skipped, source } = await this.ui(component);
 
-      // drop the design tokens into src/olum-ui.css
+      // drop the design tokens next to the components
       const styles = await this.styles();
 
       // packages the component imports but the app doesn't have
@@ -541,7 +573,7 @@ ${rule}
         console.log(colors.yellow(`\n  Run ${colors.cyan("npm i")} to install ${packages.length > 1 ? "them" : "it"}`));
       }
       if (isDef(styles)) {
-        console.log(colors.yellow(`\n  Link it in ${colors.cyan("public/index.html")}  ${colors.cyan('<link rel="stylesheet" href="/src/olum-ui.css" />')}`));
+        console.log(colors.yellow(`\n  Link it in ${colors.cyan("public/index.html")}  ${colors.cyan(`<link rel="stylesheet" href="${stylesHref}" />`)}`));
         // both files define their own tokens, merging them is left to the app
         if (fs.existsSync(path.join("src", "main.css"))) console.log(colors.yellow(`  Styles in ${colors.cyan("src/main.css")} may affect ${colors.cyan("olum-ui.css")}, it's up to you to merge or handle them`));
       }
