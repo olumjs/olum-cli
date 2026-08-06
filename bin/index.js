@@ -28,10 +28,8 @@ const pkgJSON = require("../package.json");
 const uiRawUrl = "https://raw.githubusercontent.com/olumjs/olum-ui/refs/heads/main";
 const registryUrl = `${uiRawUrl}/registry.json`;
 const stylesPath = "src/main.css";
-// marks the block appended to the app's src/main.css, so it's only appended once
-const stylesMarker = "/* olum-ui */";
-// an active (not commented out) tailwind import line
-const tailwindImport = /^[ \t]*@import\s+["']tailwindcss["'];?[ \t]*$/m;
+// the app gets its own copy, kept out of src/main.css so it survives a tailwind rebuild
+const stylesDest = path.join("src", "olum-ui.css");
 // where the registry keeps its components, deps are resolved against it
 const uiRoot = "src/components/ui";
 // where they land in the app, mirroring the library's folder structure so the relative imports keep working
@@ -446,36 +444,21 @@ ${rule}
 
   // olum-ui components rely on the design tokens defined in the library's main.css
   styles() {
-    const dest = path.join("src", "main.css");
-
     return new Promise((resolve, reject) => {
-      if (!fs.existsSync(dest)) return reject(`No '${dest}' found, run this command from the root of your olum app`);
+      if (!fs.existsSync("src")) return reject("No 'src' found, run this command from the root of your olum app");
 
-      fs.readFile(dest, "utf8", (err, data) => {
-        if (err) return reject(err);
+      // keep any local tweaks, only write it the first time
+      if (fs.existsSync(stylesDest)) return resolve(null);
 
-        // keep any local tweaks, only append it the first time
-        if (data.includes(stylesMarker)) return resolve(null);
-
-        this.loader("Adding olum-ui styles");
-        this.fetch(`${uiRawUrl}/${stylesPath}`)
-          .then(content => {
-            // the appended copy never carries an active import, the app's main.css owns that line
-            const found = content.match(tailwindImport);
-            const css = isDef(found) ? content.replace(tailwindImport, match => `/* ${match.trim()} */`) : content;
-
-            // tailwind isn't pulled in yet, hoist the import to the top since @import must precede any rule
-            const head = isDef(found) && !tailwindImport.test(data) ? `${found[0].trim()}\n${data}` : data;
-
-            // keep the trailing newline if the file had one
-            const eol = head.endsWith("\n") ? "" : "\n";
-            fs.writeFile(dest, `${head}${eol}\n${stylesMarker}\n${css}`, err => {
-              if (err) return reject(err);
-              resolve(dest);
-            });
-          })
-          .catch(reject);
-      });
+      this.loader("Adding olum-ui styles");
+      this.fetch(`${uiRawUrl}/${stylesPath}`)
+        .then(content => {
+          fs.writeFile(stylesDest, content, err => {
+            if (err) return reject(err);
+            resolve(stylesDest);
+          });
+        })
+        .catch(reject);
     });
   }
 
@@ -541,7 +524,7 @@ ${rule}
       // clone the component and its deps into src/components/ui/<Component>/
       const { dest, added, skipped, source } = await this.ui(component);
 
-      // append the design tokens to src/main.css
+      // drop the design tokens into src/olum-ui.css
       const styles = await this.styles();
 
       // packages the component imports but the app doesn't have
@@ -552,10 +535,15 @@ ${rule}
       console.log(`\n  Added ${colors.cyan(dest)}`);
       added.filter(file => file !== dest).forEach(file => console.log(`  Added ${colors.cyan(file)}`));
       skipped.forEach(file => console.log(colors.dim(`  Skipped ${file}, already exists`)));
-      if (isDef(styles)) console.log(`  Updated ${colors.cyan(styles)}`);
+      if (isDef(styles)) console.log(`  Added ${colors.cyan(styles)}`);
       if (isFullArr(packages)) {
         console.log(`  Added ${colors.cyan(packages.join(", "))} to ${colors.cyan("package.json")}`);
         console.log(colors.yellow(`\n  Run ${colors.cyan("npm i")} to install ${packages.length > 1 ? "them" : "it"}`));
+      }
+      if (isDef(styles)) {
+        console.log(colors.yellow(`\n  Link it in ${colors.cyan("public/index.html")}  ${colors.cyan('<link rel="stylesheet" href="/src/olum-ui.css" />')}`));
+        // both files define their own tokens, merging them is left to the app
+        if (fs.existsSync(path.join("src", "main.css"))) console.log(colors.yellow(`  Styles in ${colors.cyan("src/main.css")} may affect ${colors.cyan("olum-ui.css")}, it's up to you to merge or handle them`));
       }
       console.log("");
     } catch (err) {
