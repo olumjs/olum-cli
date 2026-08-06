@@ -33,7 +33,7 @@ const stylesMarker = "/* olum-ui */";
 // an active (not commented out) tailwind import line
 const tailwindImport = /^[ \t]*@import\s+["']tailwindcss["'];?[ \t]*$/m;
 // where the registry keeps its components, deps are resolved against it
-const uiRoot = "src/components";
+const uiRoot = "src/components/ui";
 // where they land in the app, mirroring the library's folder structure so the relative imports keep working
 const uiDest = path.join("src", "components", "ui");
 // components meant for the library's own docs, never installable
