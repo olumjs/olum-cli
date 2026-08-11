@@ -42,6 +42,13 @@ const uiInternal = "internal";
 // import specifiers, both the static and the dynamic form
 const importPaths = /(?:^|[\s;}])(?:import|export)[^"';]*?from\s*["']([^"']+)["']|(?:^|[\s;}])import\s*\(?\s*["']([^"']+)["']/g;
 
+// anonymous usage ping, sent once a command has finished
+const telemetryUrl = "https://olumjs.top/api/telemetry";
+// the only platforms the endpoint buckets, anything else is skipped rather than rejected
+const telemetryPlatforms = { linux: "linux", darwin: "macos", win32: "windows" };
+// a ping is never worth making anyone wait for
+const telemetryTimeout = 3000;
+
 // helpers
 const isObj = obj => !!(obj !== null && typeof obj === "object");
 const isFullObj = obj => !!(isObj(obj) && Array.isArray(Object.keys(obj)) && Object.keys(obj).length);
@@ -324,6 +331,88 @@ ${rule}
     process.stdout.write("\x1B[?25h"); // restore cursor
   }
   
+  // the olum version the app ends up on. The starter pins "latest", so the range in
+  // package.json is only a fallback for when node_modules isn't there to be read
+  olumVersion(dir) {
+    const root = isDef(dir) ? dir : ".";
+    try {
+      const installed = path.join(root, "node_modules", "olum", "package.json");
+      if (fs.existsSync(installed)) {
+        const content = JSON.parse(fs.readFileSync(installed, "utf8"));
+        if (isDef(content.version)) return String(content.version).slice(0, 32);
+      }
+
+      const pkgPath = path.join(root, "package.json");
+      if (fs.existsSync(pkgPath)) {
+        const content = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+        const deps = Object.assign({}, content.dependencies, content.devDependencies);
+        // "^0.9.2" and "~0.9.2" both describe 0.9.2
+        if (isDef(deps.olum)) return String(deps.olum).replace(/^[\^~>=<\s]+/, "").slice(0, 32) || "unknown";
+      }
+    } catch (err) {
+      // a missing or malformed package.json says nothing about the CLI run itself
+    }
+    return "unknown";
+  }
+
+  // anonymous usage ping: cli version, olum version, node major, os. No paths, project
+  // names or anything else identifying. Best-effort by definition, so every failure path
+  // resolves quietly and a broken endpoint can never change the outcome of a command
+  telemetry(dir) {
+    return new Promise(resolve => {
+      let settled = false;
+      // one resolve whichever way this ends: response, error, or timeout
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+
+      try {
+        if (process.env.OLUM_TELEMETRY_DISABLED === "1" || process.env.DO_NOT_TRACK === "1") return finish();
+
+        const os = telemetryPlatforms[process.platform];
+        if (!isDef(os)) return finish();
+
+        const body = JSON.stringify({
+          cliVersion: pkgJSON.version,
+          olumVersion: this.olumVersion(dir),
+          nodeMajor: currentNodeMajorVer,
+          os,
+          timestamp: new Date().toISOString(),
+        });
+
+        const req = https.request(
+          telemetryUrl,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Content-Length": Buffer.byteLength(body),
+              "User-Agent": "olum-cli",
+            },
+            timeout: telemetryTimeout,
+          },
+          res => {
+            // drained so the socket closes; the status is of no use to the user
+            res.resume();
+            res.on("end", finish);
+            res.on("error", finish);
+          }
+        );
+
+        req.on("error", finish);
+        req.on("timeout", () => {
+          req.destroy();
+          finish();
+        });
+        req.end(body);
+      } catch (err) {
+        finish();
+      }
+    });
+  }
+
   async create(name, options) {
     try {
       // generate boilerplate
@@ -346,6 +435,9 @@ ${rule}
     } catch (err) {
       this.stopLoader();
       console.error(colors.red(err));
+    } finally {
+      // last thing the command does, so a slow network can't hold up any output
+      await this.telemetry(name);
     }
   }
 
@@ -581,6 +673,9 @@ ${rule}
     } catch (err) {
       this.stopLoader();
       console.error(colors.red(err));
+    } finally {
+      // 'add' runs from the root of the app, so its own package.json is the one to read
+      await this.telemetry(".");
     }
   }
 }
