@@ -21,6 +21,7 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const http = require("http");
+const { homedir } = require("os");
 const colors = require("colors");
 const { exec } = require("child_process");
 const pkgJSON = require("../package.json");
@@ -53,6 +54,8 @@ const telemetryUrl = process.env.OLUM_TELEMETRY_URL || "https://www.olumjs.top/a
 const telemetryPlatforms = { darwin: "macos", win32: "windows" };
 // a ping is never worth making anyone wait for
 const telemetryTimeout = 3000;
+// drop this file in your home directory to stop a machine reporting at all
+const telemetryOptOutFile = ".olum-no-telemetry";
 
 // helpers
 const isObj = obj => !!(obj !== null && typeof obj === "object");
@@ -207,6 +210,88 @@ ${rule}
             if (err) return reject(err);
             return resolve();
           });
+        });
+      });
+    });
+  }
+
+  // the version npm actually put on disk, or null when the package isn't there.
+  // Split on "/" so scoped names ("@tailwindcss/cli") resolve to their real folder
+  installedVersion(root, pkg) {
+    try {
+      const file = path.join(root, "node_modules", ...pkg.split("/"), "package.json");
+      if (!fs.existsSync(file)) return null;
+      const content = JSON.parse(fs.readFileSync(file, "utf8"));
+      return isDef(content.version) ? String(content.version) : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // The starter ships every dependency as "latest", so the same app installs a different
+  // tree every time it's built — a CI run months from now would not get what the developer
+  // had. Rewrite those to the versions npm just resolved, as caret ranges: the committed
+  // lockfile (see unignoreLockfile) is what actually holds the tree still, and the range
+  // leaves room for `npm update` to pick up fixes. Anything already pinned is left alone.
+  pin(name) {
+    this.loader("Pinning dependency versions");
+    const root = `./${name}`;
+    return new Promise((resolve, reject) => {
+      const pkgPath = path.join(root, "package.json");
+      fs.readFile(pkgPath, "utf8", (err, data) => {
+        if (err) return reject(err);
+
+        let content;
+        try {
+          content = JSON.parse(data);
+        } catch (err) {
+          return reject("Error while parsing 'package.json' \n" + err);
+        }
+
+        const pinned = [];
+        ["dependencies", "devDependencies"].forEach(field => {
+          const deps = content[field];
+          if (!isFullObj(deps)) return;
+          Object.keys(deps).forEach(pkg => {
+            // only the floating ones — a real range is a deliberate choice
+            if (deps[pkg] !== "latest" && deps[pkg] !== "*") return;
+            // not installed (a partial install): leave it floating rather than guess
+            const version = this.installedVersion(root, pkg);
+            if (!isDef(version)) return;
+            deps[pkg] = `^${version}`;
+            pinned.push(`${pkg}@^${version}`);
+          });
+        });
+
+        // keep the trailing newline if the file had one
+        const eol = data.endsWith("\n") ? "\n" : "";
+        fs.writeFile(pkgPath, JSON.stringify(content, null, 2) + eol, err => {
+          if (err) return reject(err);
+          resolve(pinned);
+        });
+      });
+    });
+  }
+
+  // The starter ignores package-lock.json — right for a library, wrong for an app. npm
+  // writes the lockfile during install, but ignored means it never reaches a teammate's
+  // clone or CI, so the caret ranges above would resolve differently on every machine and
+  // every transitive dependency would float. Dropping that one line is what makes the app
+  // reproducible. A no-op once the starter stops ignoring it.
+  unignoreLockfile(name) {
+    const file = path.join(`./${name}`, ".gitignore");
+    return new Promise((resolve, reject) => {
+      fs.readFile(file, "utf8", (err, data) => {
+        // no .gitignore at all means nothing is being ignored
+        if (err) return resolve(false);
+
+        const lines = data.split("\n");
+        const kept = lines.filter(line => line.trim() !== "package-lock.json");
+        if (kept.length === lines.length) return resolve(false);
+
+        fs.writeFile(file, kept.join("\n"), err => {
+          if (err) return reject(err);
+          resolve(true);
         });
       });
     });
@@ -368,6 +453,39 @@ ${rule}
     return Object.keys(options).filter(key => options[key] === true);
   }
 
+  // why this run shouldn't report, or null when it should. A reason rather than a
+  // boolean so the debug flag can name the check that suppressed the ping. The numbers
+  // are only worth anything if they describe real installs, so development, CI and
+  // opted-out machines report nothing
+  telemetrySkip() {
+    // a published install always sits inside a node_modules directory. Running from a
+    // git checkout never does, and `npm link` resolves back to the checkout, so both
+    // the maintainer's runs and any contributor's are excluded without configuration
+    if (__dirname.split(path.sep).indexOf("node_modules") === -1) return "running from a source checkout, not an install";
+
+    // a build matrix across node versions would otherwise outnumber the real users
+    const ci = process.env.CI;
+    if (isDef(ci) && ci !== "" && ci !== "false" && ci !== "0") return `CI is set (CI=${ci})`;
+
+    // per-machine opt out, the only thing that covers testing a genuine install
+    try {
+      const marker = path.join(homedir(), telemetryOptOutFile);
+      if (fs.existsSync(marker)) return `opted out by ${marker}`;
+    } catch (err) {
+      // no readable home directory isn't a reason to change the outcome
+    }
+
+    return null;
+  }
+
+  // OLUM_TELEMETRY_DEBUG=1 makes the ping visible: what would be sent, and what became
+  // of it. Silent otherwise, so a normal run never mentions telemetry at all
+  telemetryLog(msg) {
+    const flag = process.env.OLUM_TELEMETRY_DEBUG;
+    if (!isDef(flag) || flag === "" || flag === "0" || flag === "false") return;
+    console.log(colors.dim(`[telemetry] ${msg}`));
+  }
+
   // anonymous usage ping: cli version, olum version, node major, os, which command ran,
   // the olum-ui component `add` installed and the flags `create` used. No paths, project
   // names or anything else identifying. Best-effort by definition, so every failure path
@@ -383,6 +501,12 @@ ${rule}
       };
 
       try {
+        const skip = this.telemetrySkip();
+        if (isDef(skip)) {
+          this.telemetryLog(`not sent — ${skip}`);
+          return finish();
+        }
+
         const platform = String(process.platform || "").toLowerCase();
         const os = telemetryPlatforms[platform] || platform || "unknown";
 
@@ -417,20 +541,35 @@ ${rule}
             timeout: telemetryTimeout,
           },
           res => {
-            // drained so the socket closes; the status is of no use to the user
+            // drained so the socket closes; the status is of no use to the user, and
+            // only surfaces under the debug flag
             res.resume();
-            res.on("end", finish);
-            res.on("error", finish);
+            res.on("end", () => {
+              this.telemetryLog(`sent — HTTP ${res.statusCode}`);
+              finish();
+            });
+            res.on("error", err => {
+              this.telemetryLog(`response failed — ${err.message}`);
+              finish();
+            });
           }
         );
 
-        req.on("error", finish);
+        req.on("error", err => {
+          this.telemetryLog(`not sent — ${err.message}`);
+          finish();
+        });
         req.on("timeout", () => {
+          this.telemetryLog(`not sent — no response within ${telemetryTimeout}ms`);
           req.destroy();
           finish();
         });
+
+        this.telemetryLog(`POST ${telemetryUrl}`);
+        this.telemetryLog(body);
         req.end(body);
       } catch (err) {
+        this.telemetryLog(`not sent — ${err.message}`);
         finish();
       }
     });
@@ -449,7 +588,13 @@ ${rule}
 
       // installing modules
       await this.dep(name);
-      
+
+      // freeze what npm just resolved, before the commit records it
+      await this.pin(name);
+
+      // and let the lockfile it wrote be committed alongside
+      await this.unignoreLockfile(name);
+
       // init git repo
       await this.git(name);
       
