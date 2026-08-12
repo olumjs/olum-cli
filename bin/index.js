@@ -20,6 +20,7 @@ const download = require("download-git-repo");
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const http = require("http");
 const colors = require("colors");
 const { exec } = require("child_process");
 const pkgJSON = require("../package.json");
@@ -42,10 +43,14 @@ const uiInternal = "internal";
 // import specifiers, both the static and the dynamic form
 const importPaths = /(?:^|[\s;}])(?:import|export)[^"';]*?from\s*["']([^"']+)["']|(?:^|[\s;}])import\s*\(?\s*["']([^"']+)["']/g;
 
-// anonymous usage ping, sent once a command has finished
-const telemetryUrl = "https://olumjs.top/api/telemetry";
-// the only platforms the endpoint buckets, anything else is skipped rather than rejected
-const telemetryPlatforms = { linux: "linux", darwin: "macos", win32: "windows" };
+// anonymous usage ping, sent once a command has finished. Overridable so the endpoint
+// can be pointed at a local dev server while it's being worked on
+// the canonical host: the apex domain 308-redirects to www, and this request doesn't
+// follow redirects, so posting to the apex silently drops every ping
+const telemetryUrl = process.env.OLUM_TELEMETRY_URL || "https://www.olumjs.top/api/telemetry";
+// only the two platforms node names differently from how anyone reads them. Everything
+// else (freebsd, openbsd, sunos, aix, android...) is reported under its own name
+const telemetryPlatforms = { darwin: "macos", win32: "windows" };
 // a ping is never worth making anyone wait for
 const telemetryTimeout = 3000;
 
@@ -331,12 +336,13 @@ ${rule}
     process.stdout.write("\x1B[?25h"); // restore cursor
   }
   
-  // the olum version the app ends up on. The starter pins "latest", so the range in
-  // package.json is only a fallback for when node_modules isn't there to be read
-  olumVersion(dir) {
+  // the version a package resolved to in the app. The starter pins "latest", so the
+  // range in package.json is only a fallback for when node_modules isn't there to be
+  // read. Covers devDependencies too, which is where olum-compiler lives
+  depVersion(dir, pkg) {
     const root = isDef(dir) ? dir : ".";
     try {
-      const installed = path.join(root, "node_modules", "olum", "package.json");
+      const installed = path.join(root, "node_modules", pkg, "package.json");
       if (fs.existsSync(installed)) {
         const content = JSON.parse(fs.readFileSync(installed, "utf8"));
         if (isDef(content.version)) return String(content.version).slice(0, 32);
@@ -347,7 +353,7 @@ ${rule}
         const content = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
         const deps = Object.assign({}, content.dependencies, content.devDependencies);
         // "^0.9.2" and "~0.9.2" both describe 0.9.2
-        if (isDef(deps.olum)) return String(deps.olum).replace(/^[\^~>=<\s]+/, "").slice(0, 32) || "unknown";
+        if (isDef(deps[pkg])) return String(deps[pkg]).replace(/^[\^~>=<\s]+/, "").slice(0, 32) || "unknown";
       }
     } catch (err) {
       // a missing or malformed package.json says nothing about the CLI run itself
@@ -355,10 +361,18 @@ ${rule}
     return "unknown";
   }
 
-  // anonymous usage ping: cli version, olum version, node major, os. No paths, project
+  // the flags a command actually ran with, e.g. ["tailwind"]. Commander leaves the
+  // ones that weren't passed undefined, so only the truthy keys are real
+  flags(options) {
+    if (!isFullObj(options)) return [];
+    return Object.keys(options).filter(key => options[key] === true);
+  }
+
+  // anonymous usage ping: cli version, olum version, node major, os, which command ran,
+  // the olum-ui component `add` installed and the flags `create` used. No paths, project
   // names or anything else identifying. Best-effort by definition, so every failure path
   // resolves quietly and a broken endpoint can never change the outcome of a command
-  telemetry(dir) {
+  telemetry(dir, type, name, options) {
     return new Promise(resolve => {
       let settled = false;
       // one resolve whichever way this ends: response, error, or timeout
@@ -369,20 +383,29 @@ ${rule}
       };
 
       try {
-        if (process.env.OLUM_TELEMETRY_DISABLED === "1" || process.env.DO_NOT_TRACK === "1") return finish();
-
-        const os = telemetryPlatforms[process.platform];
-        if (!isDef(os)) return finish();
+        const platform = String(process.platform || "").toLowerCase();
+        const os = telemetryPlatforms[platform] || platform || "unknown";
 
         const body = JSON.stringify({
           cliVersion: pkgJSON.version,
-          olumVersion: this.olumVersion(dir),
-          nodeMajor: currentNodeMajorVer,
+          olumVersion: this.depVersion(dir, "olum"),
+          compilerVersion: this.depVersion(dir, "olum-compiler"),
+          // the exact runtime as node reports it, "24.15.0" — sent verbatim, a major
+          // alone can't separate a patch-level regression from the whole release line
+          nodeVersion: process.versions.node,
           os,
+          type,
+          // kebab-cased so the same component or project counts as one label however it was typed
+          name: isDef(name) ? toKebabCase(String(name)) : undefined,
+          options: this.flags(options),
           timestamp: new Date().toISOString(),
         });
 
-        const req = https.request(
+        // https everywhere except a local dev endpoint, which node refuses to
+        // dial with the https client
+        const transport = telemetryUrl.indexOf("http://") === 0 ? http : https;
+
+        const req = transport.request(
           telemetryUrl,
           {
             method: "POST",
@@ -432,12 +455,17 @@ ${rule}
       
       // instructions
       this.postInstall(name);
+
+      // reported here rather than in a `finally` so only a project that actually
+      // scaffolded is counted — a clone or install that died partway isn't one.
+      // Last thing the command does, so a slow network can't hold up any output.
+      // The project name is the user's own wording and can identify them or an
+      // unreleased product, so only the fact that a project was created is
+      // reported, never its name
+      await this.telemetry(name, "create", undefined, options);
     } catch (err) {
       this.stopLoader();
       console.error(colors.red(err));
-    } finally {
-      // last thing the command does, so a slow network can't hold up any output
-      await this.telemetry(name);
     }
   }
 
@@ -670,12 +698,15 @@ ${rule}
         if (fs.existsSync(path.join("src", "main.css"))) console.log(colors.yellow(`  Styles in ${colors.cyan("src/main.css")} may affect ${colors.cyan("olum-ui.css")}, it's up to you to merge or handle them`));
       }
       console.log("");
+
+      // reported here rather than in a `finally` so only a component that actually
+      // landed is counted — a name that isn't in the registry, or one already
+      // installed, is not an install and shouldn't show up as one.
+      // 'add' runs from the root of the app, so its own package.json is the one to read
+      await this.telemetry(".", "add", name);
     } catch (err) {
       this.stopLoader();
       console.error(colors.red(err));
-    } finally {
-      // 'add' runs from the root of the app, so its own package.json is the one to read
-      await this.telemetry(".");
     }
   }
 }
