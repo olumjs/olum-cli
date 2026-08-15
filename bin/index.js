@@ -215,94 +215,12 @@ ${rule}
     });
   }
 
-  // the version npm actually put on disk, or null when the package isn't there.
-  // Split on "/" so scoped names ("@tailwindcss/cli") resolve to their real folder
-  installedVersion(root, pkg) {
-    try {
-      const file = path.join(root, "node_modules", ...pkg.split("/"), "package.json");
-      if (!fs.existsSync(file)) return null;
-      const content = JSON.parse(fs.readFileSync(file, "utf8"));
-      return isDef(content.version) ? String(content.version) : null;
-    } catch (err) {
-      return null;
-    }
-  }
-
-  // The starter ships every dependency as "latest", so the same app installs a different
-  // tree every time it's built — a CI run months from now would not get what the developer
-  // had. Rewrite those to the versions npm just resolved, as caret ranges: the committed
-  // lockfile (see unignoreLockfile) is what actually holds the tree still, and the range
-  // leaves room for `npm update` to pick up fixes. Anything already pinned is left alone.
-  pin(name) {
-    this.loader("Pinning dependency versions");
-    const root = `./${name}`;
-    return new Promise((resolve, reject) => {
-      const pkgPath = path.join(root, "package.json");
-      fs.readFile(pkgPath, "utf8", (err, data) => {
-        if (err) return reject(err);
-
-        let content;
-        try {
-          content = JSON.parse(data);
-        } catch (err) {
-          return reject("Error while parsing 'package.json' \n" + err);
-        }
-
-        const pinned = [];
-        ["dependencies", "devDependencies"].forEach(field => {
-          const deps = content[field];
-          if (!isFullObj(deps)) return;
-          Object.keys(deps).forEach(pkg => {
-            // only the floating ones — a real range is a deliberate choice
-            if (deps[pkg] !== "latest" && deps[pkg] !== "*") return;
-            // not installed (a partial install): leave it floating rather than guess
-            const version = this.installedVersion(root, pkg);
-            if (!isDef(version)) return;
-            deps[pkg] = `^${version}`;
-            pinned.push(`${pkg}@^${version}`);
-          });
-        });
-
-        // keep the trailing newline if the file had one
-        const eol = data.endsWith("\n") ? "\n" : "";
-        fs.writeFile(pkgPath, JSON.stringify(content, null, 2) + eol, err => {
-          if (err) return reject(err);
-          resolve(pinned);
-        });
-      });
-    });
-  }
-
-  // The starter ignores package-lock.json — right for a library, wrong for an app. npm
-  // writes the lockfile during install, but ignored means it never reaches a teammate's
-  // clone or CI, so the caret ranges above would resolve differently on every machine and
-  // every transitive dependency would float. Dropping that one line is what makes the app
-  // reproducible. A no-op once the starter stops ignoring it.
-  unignoreLockfile(name) {
-    const file = path.join(`./${name}`, ".gitignore");
-    return new Promise((resolve, reject) => {
-      fs.readFile(file, "utf8", (err, data) => {
-        // no .gitignore at all means nothing is being ignored
-        if (err) return resolve(false);
-
-        const lines = data.split("\n");
-        const kept = lines.filter(line => line.trim() !== "package-lock.json");
-        if (kept.length === lines.length) return resolve(false);
-
-        fs.writeFile(file, kept.join("\n"), err => {
-          if (err) return reject(err);
-          resolve(true);
-        });
-      });
-    });
-  }
-
   readme(name) {
     return new Promise((resolve, reject) => {
       const readmePath = `./${name}/README.md`;
       fs.readFile(readmePath, "utf8", (err, data) => {
         if (err) return reject(err);
-        fs.writeFile(readmePath, data.replace(/{{name}}/g, name), err => {
+        fs.writeFile(readmePath, data.replace(/{name}/g, name), err => {
           if (err) return reject(err);
           resolve();
         });
@@ -322,14 +240,64 @@ ${rule}
     });
   }
 
+  // a spec npm can't re-resolve to a newer release: a local path, a git or http url, an
+  // alias. Those are deliberate, they're installed exactly as the starter wrote them
+  fixed(range) {
+    const spec = String(range || "");
+    return spec.includes(":") || spec.startsWith(".") || spec.startsWith("/");
+  }
+
+  // A plain `npm i` reinstalls whatever the starter's package.json describes, and a range
+  // written months ago resolves to what it resolved to back then. Install the two fields
+  // by name instead — `pkg@latest` re-resolves the dist-tag on every run — and let npm
+  // write the version it actually picked back into package.json as a caret range. That is
+  // what the pinning step used to do by hand, only now it's npm's own answer, and the
+  // lockfile npm writes alongside it — the starter commits it — holds the tree still.
   dep(name) {
     this.loader("Installing packages");
+    const pkgPath = path.join(`./${name}`, "package.json");
     return new Promise((resolve, reject) => {
-      exec(`cd ${name} && npm i`, (error, stdout, stderr) => {
-        if (error) return reject(error);
-        console.log(stdout);
-        console.log(stderr);
-        resolve();
+      fs.readFile(pkgPath, "utf8", (err, data) => {
+        if (err) return reject(err);
+
+        let content;
+        try {
+          content = JSON.parse(data);
+        } catch (err) {
+          return reject("Error while parsing 'package.json' \n" + err);
+        }
+
+        // "pkg@latest" for anything the registry serves, the original spec for the rest
+        const specs = field => {
+          const deps = content[field];
+          if (!isFullObj(deps)) return [];
+          return Object.keys(deps).map(pkg => (this.fixed(deps[pkg]) ? `${pkg}@${deps[pkg]}` : `${pkg}@latest`));
+        };
+
+        const deps = specs("dependencies");
+        const devDeps = specs("devDependencies");
+
+        // npm adds them back as it installs, at the versions it just resolved
+        delete content.dependencies;
+        delete content.devDependencies;
+
+        const eol = data.endsWith("\n") ? "\n" : "";
+        fs.writeFile(pkgPath, JSON.stringify(content, null, 2) + eol, err => {
+          if (err) return reject(err);
+
+          const steps = [];
+          if (isFullArr(deps)) steps.push(`npm i ${deps.join(" ")}`);
+          if (isFullArr(devDeps)) steps.push(`npm i -D ${devDeps.join(" ")}`);
+          // an app with no dependencies at all still needs its lockfile
+          if (!isFullArr(steps)) steps.push("npm i");
+
+          exec(`cd ${name} && ${steps.join(" && ")}`, (error, stdout, stderr) => {
+            if (error) return reject(error);
+            console.log(stdout);
+            console.log(stderr);
+            resolve();
+          });
+        });
       });
     });
   }
@@ -586,14 +554,8 @@ ${rule}
       // options
       if (options.tailwind) await this.tailwind(name);
 
-      // installing modules
+      // installing modules, each one at its latest release
       await this.dep(name);
-
-      // freeze what npm just resolved, before the commit records it
-      await this.pin(name);
-
-      // and let the lockfile it wrote be committed alongside
-      await this.unignoreLockfile(name);
 
       // init git repo
       await this.git(name);
