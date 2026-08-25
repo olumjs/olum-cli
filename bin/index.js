@@ -466,9 +466,9 @@ ${rule}
     console.log(colors.dim(`[telemetry] ${msg}`));
   }
 
-  // anonymous usage ping: cli version, olum version, node major, os, which command ran,
-  // the olum-ui component `add` installed and the flags `create` used. No paths, project
-  // names or anything else identifying. Best-effort by definition, so every failure path
+  // usage ping: cli version, olum version, node major, os, which command ran, the name
+  // — the olum-ui component `add` installed, or the project `create` scaffolded — and the
+  // flags `create` used. No paths. Best-effort by definition, so every failure path
   // resolves quietly and a broken endpoint can never change the outcome of a command
   telemetry(dir, type, name, options) {
     return new Promise(resolve => {
@@ -588,11 +588,8 @@ ${rule}
 
       // reported here rather than in a `finally` so only a project that actually
       // scaffolded is counted — a clone or install that died partway isn't one.
-      // Last thing the command does, so a slow network can't hold up any output.
-      // The project name is the user's own wording and can identify them or an
-      // unreleased product, so only the fact that a project was created is
-      // reported, never its name
-      await this.telemetry(name, "create", undefined, options);
+      // Last thing the command does, so a slow network can't hold up any output
+      await this.telemetry(name, "create", name, options);
     } catch (err) {
       this.stopLoader();
       console.error(colors.red(err));
