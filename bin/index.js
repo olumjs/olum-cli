@@ -336,8 +336,10 @@ ${rule}
     for (let i = 0; i < this.warnings.length; i++) console.log(colors.yellow(`    ${this.warnings[i]}\n`));
 
     // check latest version of olum-cli
-    exec('npm show olum-cli version', (error, stdout, stderr) => {
-      if (error || stderr) return;
+    // stderr is ignored on purpose: npm writes its own notices there, and a notice
+    // is not a failure — only a non-zero exit means the lookup did not work
+    exec('npm show olum-cli version', (error, stdout) => {
+      if (error) return;
       const current = require("../package.json").version;
       const latest = stdout.trim();
       const currentVerArr = current.split(".");
@@ -361,13 +363,20 @@ ${rule}
         else if (currentMinor < latestMinor) type = "minor";
         else if (currentRevision < latestRevision) type = "revision";
         
+        // npx runs its own cached copy of the cli, so a global install leaves that copy
+        // untouched and the hint would keep coming back. Tell those users to drop the cache
+        const fromNpx = __dirname.split(path.sep).includes("_npx");
+        const howTo = fromNpx
+          ? `Run ${colors.green("npx clear-npx-cache")} to update!`
+          : `Run ${colors.green("npm install -g olum-cli")} to update!`;
+
         const hint = 
         `
     ${colors.yellow.bold(border)}
     
       ${`New ${colors.red(type)} version of olum-cli available! ${colors.red(current)} > ${colors.green(latest)}`}
       
-      ${`Run ${colors.green("npm install -g olum-cli")} to update!`}
+      ${howTo}
       
     ${colors.yellow.bold(border)}
         `;
