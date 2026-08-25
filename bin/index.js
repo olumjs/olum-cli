@@ -490,6 +490,16 @@ ${rule}
         const platform = String(process.platform || "").toLowerCase();
         const os = telemetryPlatforms[platform] || platform || "unknown";
 
+        // IANA zone name, "Africa/Cairo". Preferred over the utc offset because the
+        // name holds still while the offset shifts twice a year with daylight saving.
+        // A stripped-down system can leave it unresolved, so it is guarded
+        let timezone = "unknown";
+        try {
+          timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown";
+        } catch (err) {
+          timezone = "unknown";
+        }
+
         const body = JSON.stringify({
           cliVersion: pkgJSON.version,
           olumVersion: this.depVersion(dir, "olum"),
@@ -498,6 +508,7 @@ ${rule}
           // alone can't separate a patch-level regression from the whole release line
           nodeVersion: process.versions.node,
           os,
+          timezone,
           type,
           // kebab-cased so the same component or project counts as one label however it was typed
           name: isDef(name) ? toKebabCase(String(name)) : undefined,
