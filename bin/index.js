@@ -75,6 +75,8 @@ String.prototype.cap = function () {
 
 class CLI {
   hasHelpers = false;
+  // non-fatal problems, shown once the command has finished and cleared the screen
+  warnings = [];
   constructor() {
     cmd.version(pkgJSON.version);
     cmd.on("command:*", operands => {
@@ -228,11 +230,19 @@ ${rule}
     });
   }
 
+  // the repository is a convenience, not part of the app. git missing from PATH, or
+  // installed without a user.name/user.email — the state a fresh windows machine is in —
+  // used to reject here, which threw away the post-install instructions and the ping for
+  // a project that had already been generated and installed. Warn and carry on instead
   git(name) {
     this.loader("Initializing git repository");
-    return new Promise((resolve, reject) => {
-      exec(`cd ${name} && git init && git add . && git commit -m "Initial Commit via Olum CLI"`, (error, stdout, stderr) => {
-        if (error) return reject(error);
+    return new Promise(resolve => {
+      exec(`cd "${name}" && git init && git add . && git commit -m "Initial Commit via Olum CLI"`, (error, stdout, stderr) => {
+        if (error) {
+          // postInstall clears the screen, so the warning is held back and printed with it
+          this.warnings.push(`Skipped git setup — ${String(error.message || error).trim().split("\n")[0]}\n      Your project is ready, run 'git init' inside it whenever you want a repository`);
+          return resolve();
+        }
         console.log(stdout);
         console.log(stderr);
         resolve();
@@ -291,7 +301,7 @@ ${rule}
           // an app with no dependencies at all still needs its lockfile
           if (!isFullArr(steps)) steps.push("npm i");
 
-          exec(`cd ${name} && ${steps.join(" && ")}`, (error, stdout, stderr) => {
+          exec(`cd "${name}" && ${steps.join(" && ")}`, (error, stdout, stderr) => {
             if (error) return reject(error);
             console.log(stdout);
             console.log(stderr);
@@ -322,6 +332,8 @@ ${rule}
     this.stopLoader();
     console.clear();
     console.log(info);
+
+    for (let i = 0; i < this.warnings.length; i++) console.log(colors.yellow(`    ${this.warnings[i]}\n`));
 
     // check latest version of olum-cli
     exec('npm show olum-cli version', (error, stdout, stderr) => {

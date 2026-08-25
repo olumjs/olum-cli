@@ -1,6 +1,6 @@
 {
   "name": "olum-cli",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "A CLI tool for olumjs",
   "main": "bin/index.js",
   "bin": {
@@ -39,7 +39,11 @@
       "url": "https://olumjs.top/docs"
     },
     "colors": {
-      "title": ["red", "yellow", "blue"],
+      "title": [
+        "red",
+        "yellow",
+        "blue"
+      ],
       "command": "cyan"
     },
     "commands": {
