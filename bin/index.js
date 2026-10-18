@@ -84,7 +84,7 @@ class CLI {
       process.exitCode = 1;
     });
     cmd.on("--help", this.guide.bind(this));
-    cmd.command("create").arguments("<name>").option("--tailwind", "Install Tailwind CSS").action(this.create.bind(this));
+    cmd.command("create").arguments("<name>").option("--tailwind", "Install Tailwind CSS").option("--omen", "Use the omen boilerplate").action(this.create.bind(this));
     cmd.command("add").arguments("<name>").action(this.add.bind(this));
     cmd.parse(process.argv);
   }
@@ -179,6 +179,7 @@ ${row("add <name>",            "Add an olum-ui component to src/components/ui")}
   ${hl("Flags")}
 
 ${row("--tailwind",             "Install and configure Tailwind CSS")}
+${row("--omen",                 "Use the omen boilerplate")}
 
   ${hl("Options")}
 
@@ -196,9 +197,8 @@ ${rule}
     console.log(out);
   }
 
-  clone(name, branch) {
+  clone(name, branch, repo = "https://github.com/olumjs/olum-starter.git") {
     this.loader("Generating boilerplate");
-    const repo = "https://github.com/olumjs/olum-starter.git";
     return new Promise((resolve, reject) => {
       download(`direct:${repo}#${branch}`, `./${name}`, { clone: true }, err => {
         if (err) return reject("Error while cloning starter code \n" + err);
@@ -206,7 +206,7 @@ ${rule}
         fs.readFile(`./${name}/package.json`, "utf8", (err, data) => {
           if (err) return reject(err);
           const content = JSON.parse(data);
-          content.name = toKebabCase(name);
+          content.name = toKebabCase(path.basename(name));
           if (this.hasHelpers) content.dependencies["olum-helpers"] = "latest";
           fs.writeFile(`./${name}/package.json`, JSON.stringify(content, null, 2), err => {
             if (err) return reject(err);
@@ -217,12 +217,12 @@ ${rule}
     });
   }
 
-  readme(name) {
+  readme(name, title = name) {
     return new Promise((resolve, reject) => {
       const readmePath = `./${name}/README.md`;
       fs.readFile(readmePath, "utf8", (err, data) => {
         if (err) return reject(err);
-        fs.writeFile(readmePath, data.replace(/{name}/g, name), err => {
+        fs.writeFile(readmePath, data.replace(/{name}/g, title), err => {
           if (err) return reject(err);
           resolve();
         });
@@ -577,17 +577,29 @@ ${rule}
 
   async create(name, options) {
     try {
+      // the olum app, omen keeps it in its client folder
+      const app = options.omen ? path.join(name, "client") : name;
+
       // generate boilerplate
-      await this.clone(name, "main");
+      if (options.omen) {
+        await this.clone(name, "main", "https://github.com/olumjs/omen.git");
+        // the app reads its config from .env, ship it ready to run
+        const env = path.join(name, ".env.example");
+        if (fs.existsSync(env)) fs.copyFileSync(env, path.join(name, ".env"));
+        // git can't clone into a folder that isn't empty, the placeholder goes first
+        fs.rmSync(app, { recursive: true, force: true });
+      }
+      await this.clone(app, "main");
 
       // rename app in README
-      await this.readme(name);
+      await this.readme(app, name);
 
       // options
-      if (options.tailwind) await this.tailwind(name);
+      if (options.tailwind) await this.tailwind(app);
 
       // installing modules, each one at its latest release
-      await this.dep(name);
+      if (options.omen) await this.dep(name);
+      await this.dep(app);
 
       // init git repo
       await this.git(name);
@@ -598,7 +610,7 @@ ${rule}
       // reported here rather than in a `finally` so only a project that actually
       // scaffolded is counted — a clone or install that died partway isn't one.
       // Last thing the command does, so a slow network can't hold up any output
-      await this.telemetry(name, "create", name, options);
+      await this.telemetry(app, "create", name, options);
     } catch (err) {
       this.stopLoader();
       console.error(colors.red(err));
