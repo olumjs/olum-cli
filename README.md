@@ -6,6 +6,8 @@
 </p>
 
 # Olum-CLI
+A CLI tool for Olumjs.
+
 See [Documentation](https://olumjs.top/docs)
 
 ## Contributing
@@ -50,7 +52,7 @@ Not sure which one is the latest? Check the branch list on GitHub (or run `git b
    ```bash
    git push origin feat/my-awesome-feature
    ```
-9. **Open a Pull Request** against the **latest version branch** (e.g. `v0.7.0`) — *not* an older version. Describe what changed, why, and include a small example if it's user-facing.
+9. **Open a Pull Request** against the **latest version branch** (e.g. `v0.7.0`) — *not* `v0.6.8` or an older version. Describe what changed, why, and include a small example if it's user-facing.
 
 ### Docs are part of the change
 The documentation in [`docs/`](./docs) must match the code. If your PR changes behavior, adds a feature, or fixes something users could trip over, update the relevant page(s) in the same PR. A brand-new topic gets its own `docs/<topic>.md` page, linked from `docs/README.md`.
@@ -60,7 +62,6 @@ No docs change needed? Just say so in the PR description (e.g. internal refactor
 ### PR checklist
 - [ ] Branched from the **latest** version branch (not an older one)
 - [ ] PR targets the latest version branch
-
 - [ ] Docs in `docs/` updated where needed
 - [ ] One focused change, clear commit messages
 
